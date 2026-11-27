@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { summaryRequestSchema } from "@/lib/validation";
 
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash,gemini-3.8-flash-lite";
 
 export const dynamic = "force-dynamic";
 
@@ -65,46 +65,27 @@ export async function POST(request: Request) {
   ].join("\n");
 
   try {
-    const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-          generationConfig: {
-            maxOutputTokens: 1000,
-            responseMimeType: "application/json",
-            thinkingConfig: { thinkingBudget: 0 },
-          },
-        }),
-      },
+    const models = (process.env.GEMINI_MODEL ?? DEFAULT_MODEL)
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean);
+
+    const text = await generateWithFallback(
+      apiKey,
+      models,
+      systemPrompt,
+      userPrompt,
     );
 
-    if (!response.ok) {
-      const detail = await response.text();
-      console.error("summarise failed", response.status, detail);
+    if (text === null) {
       return NextResponse.json(
         {
           error:
-            "The summary service did not respond. Check GEMINI_API_KEY and GEMINI_MODEL, then try again.",
+            "The summary service is busy right now. Please try again in a moment.",
         },
         { status: 502 },
       );
     }
-
-    const data = (await response.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    const text = (data.candidates?.[0]?.content?.parts ?? [])
-      .map((part) => part.text ?? "")
-      .join("\n")
-      .trim();
 
     const summary = parseBrief(text);
     if (!summary) {
@@ -125,6 +106,62 @@ export async function POST(request: Request) {
       { status: 502 },
     );
   }
+}
+
+// Tries each model in order. Retries briefly when Google reports the model is
+// busy (503) or rate-limited (429), and moves to the next model on other errors.
+async function generateWithFallback(
+  apiKey: string,
+  models: string[],
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<string | null> {
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": apiKey,
+          },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+            generationConfig: {
+              maxOutputTokens: 2000,
+              responseMimeType: "application/json",
+            },
+          }),
+        },
+      );
+
+      if (response.ok) {
+        const data = (await response.json()) as {
+          candidates?: { content?: { parts?: { text?: string }[] } }[];
+        };
+        return (data.candidates?.[0]?.content?.parts ?? [])
+          .map((part) => part.text ?? "")
+          .join("\n")
+          .trim();
+      }
+
+      console.error(
+        "gemini failed",
+        model,
+        response.status,
+        await response.text(),
+      );
+
+      if (response.status === 503 || response.status === 429) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        continue;
+      }
+      break;
+    }
+  }
+  return null;
 }
 
 function parseBrief(text: string) {
