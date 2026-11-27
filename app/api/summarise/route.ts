@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { summaryRequestSchema } from "@/lib/validation";
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.8-flash";
 
 export const dynamic = "force-dynamic";
 
