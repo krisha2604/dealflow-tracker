@@ -166,7 +166,12 @@ async function listUsableModels(apiKey: string): Promise<string[]> {
     cachedModels = names;
   }
 
-  return cachedModels.filter((name) => !skippedModels.has(name)).slice(0, 8);
+  return [
+    "gemini-3.6-flash",
+    ...cachedModels.filter(
+      (name) => name !== "gemini-3.6-flash" && !skippedModels.has(name),
+    ),
+  ].slice(0, 8);
 }
 
 // Tries models in order until one answers. A 503 (busy) gets one quick retry.
