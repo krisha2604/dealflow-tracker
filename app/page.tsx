@@ -20,6 +20,7 @@ export default async function HomePage() {
           <h1 className="mt-2 font-serif text-4xl tracking-tight sm:text-5xl">Pipeline</h1>
           <p className="mt-3 max-w-xl text-base leading-relaxed text-muted-foreground">
             Every company the team is tracking, from a first mention to a closed round.
+            Open any company to add notes, change its stage and generate an investment brief.
           </p>
         </div>
         <AddStartupDialog />
