@@ -113,65 +113,76 @@ export async function POST(request: Request) {
   }
 }
 
-// Asks Google which models this key can use, so no model name is hardcoded.
-// Keeps text "flash" models that support generateContent, newest first,
-// with "-latest" aliases and non-lite models ahead of lite ones.
+// Models that returned "no quota" or "not found" are remembered so later
+// requests skip them. Resets whenever the server restarts.
+const skippedModels = new Set<string>();
 let cachedModels: string[] = [];
 
+// Asks Google which text models this key can call, so no name is hardcoded.
+// Prefers non-lite "flash" models, newest first, then lite ones.
 async function listUsableModels(apiKey: string): Promise<string[]> {
-  if (cachedModels.length > 0) return cachedModels;
-
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
-    {
-      headers: { "x-goog-api-key": apiKey },
-      signal: AbortSignal.timeout(6000),
-    },
-  );
-
-  if (!response.ok) {
-    console.error("list models failed", response.status, await response.text());
-    return [];
-  }
-
-  const data = (await response.json()) as {
-    models?: { name?: string; supportedGenerationMethods?: string[] }[];
-  };
-
-  const names = (data.models ?? [])
-    .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
-    .map((m) => (m.name ?? "").replace(/^models\//, ""))
-    .filter((name) => name.includes("flash"))
-    .filter(
-      (name) =>
-        !/image|tts|audio|live|embedding|robotics|computer|learnlm|gemma/.test(
-          name,
-        ),
+  if (cachedModels.length === 0) {
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+      {
+        headers: { "x-goog-api-key": apiKey },
+        signal: AbortSignal.timeout(6000),
+      },
     );
 
-  const score = (name: string) =>
-    (name.includes("lite") ? 2 : 0) + (name.includes("latest") ? 0 : 1);
+    if (!response.ok) {
+      console.error(
+        "list models failed",
+        response.status,
+        await response.text(),
+      );
+      return [];
+    }
 
-  names.sort((a, b) => {
-    const diff = score(a) - score(b);
-    if (diff !== 0) return diff;
-    return b.localeCompare(a, undefined, { numeric: true });
-  });
+    const data = (await response.json()) as {
+      models?: { name?: string; supportedGenerationMethods?: string[] }[];
+    };
 
-  cachedModels = names.slice(0, 4);
-  return cachedModels;
+    const names = (data.models ?? [])
+      .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+      .map((m) => (m.name ?? "").replace(/^models\//, ""))
+      .filter((name) => name.includes("flash") || name.includes("lite"))
+      .filter(
+        (name) =>
+          !/image|tts|audio|live|embedding|robotics|computer|learnlm|gemma|vision|imagen|veo/.test(
+            name,
+          ),
+      );
+
+    const score = (name: string) =>
+      (name.includes("lite") ? 2 : 0) + (name.includes("latest") ? 0 : 1);
+
+    names.sort((a, b) => {
+      const diff = score(a) - score(b);
+      if (diff !== 0) return diff;
+      return b.localeCompare(a, undefined, { numeric: true });
+    });
+
+    cachedModels = names;
+  }
+
+  return cachedModels.filter((name) => !skippedModels.has(name)).slice(0, 8);
 }
 
-// Tries each model in order. One quick retry when a model is busy (503) or
-// rate-limited (429); moves straight to the next model on any other error.
+// Tries models in order until one answers. A 503 (busy) gets one quick retry.
+// A 429 (no quota), 404 or any other error skips to the next model at once.
 async function generateWithFallback(
   apiKey: string,
   models: string[],
   systemPrompt: string,
   userPrompt: string,
 ): Promise<string | null> {
+  const deadline = Date.now() + 25000;
+
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (Date.now() > deadline) return null;
+
       try {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -189,7 +200,7 @@ async function generateWithFallback(
                 responseMimeType: "application/json",
               },
             }),
-            signal: AbortSignal.timeout(9000),
+            signal: AbortSignal.timeout(8000),
           },
         );
 
@@ -197,22 +208,24 @@ async function generateWithFallback(
           const data = (await response.json()) as {
             candidates?: { content?: { parts?: { text?: string }[] } }[];
           };
-          return (data.candidates?.[0]?.content?.parts ?? [])
+          const text = (data.candidates?.[0]?.content?.parts ?? [])
             .map((part) => part.text ?? "")
             .join("\n")
             .trim();
+          console.log("gemini ok", model);
+          return text;
         }
 
-        console.error(
-          "gemini failed",
-          model,
-          response.status,
-          await response.text(),
-        );
+        const detail = await response.text();
+        console.error("gemini failed", model, response.status, detail.slice(0, 300));
 
-        if (response.status === 503 || response.status === 429) {
-          await new Promise((resolve) => setTimeout(resolve, 700));
+        if (response.status === 503 && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 600));
           continue;
+        }
+
+        if (response.status === 429 || response.status === 404) {
+          skippedModels.add(model);
         }
         break;
       } catch (error) {
