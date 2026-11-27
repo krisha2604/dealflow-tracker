@@ -1,9 +1,8 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 
 import { summaryRequestSchema } from "@/lib/validation";
 
-const DEFAULT_MODEL = "claude-sonnet-5-5";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
 export const dynamic = "force-dynamic";
 
@@ -23,12 +22,12 @@ export async function POST(request: Request) {
     );
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
       {
         error:
-          "Add ANTHROPIC_API_KEY on the server to generate summaries. The rest of the tracker still works.",
+          "Add GEMINI_API_KEY on the server to generate summaries. The rest of the tracker still works.",
       },
       { status: 503 },
     );
@@ -42,44 +41,71 @@ export async function POST(request: Request) {
           .map((note, index) => `${index + 1}. (${note.created_at}) ${note.body}`)
           .join("\n");
 
-  try {
-    const client = new Anthropic({ apiKey });
-    const message = await client.messages.create({
-      model: process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_MODEL,
-      max_tokens: 600,
-      system: [
-        "You prepare a three-bullet investment brief for a venture partnership.",
-        "Use only the facts in the user message. Do not invent revenue, customers, or valuations.",
-        "If the notes are empty, say so in the notes field.",
-        'Reply with JSON only, no markdown: {"what":"...","notes":"...","next":"..."}',
-        "what: one sentence on what the company does.",
-        "notes: one sentence on the key points in the notes.",
-        "next: one concrete suggested next step for the current stage.",
-        "Keep each field under 40 words.",
-      ].join(" "),
-      messages: [
-        {
-          role: "user",
-          content: [
-            `Company: ${startup.name}`,
-            `Sector: ${startup.sector ?? "Unknown"}`,
-            `Stage: ${startup.stage}`,
-            `Location: ${startup.location ?? "Unknown"}`,
-            `Website: ${startup.website ?? "None"}`,
-            `One-liner: ${startup.one_liner ?? "None"}`,
-            "",
-            "Notes:",
-            noteBlock,
-          ].join("\n"),
-        },
-      ],
-    });
+  const systemPrompt = [
+    "You prepare a three-bullet investment brief for a venture partnership.",
+    "Use only the facts in the user message. Do not invent revenue, customers, or valuations.",
+    "If the notes are empty, say so in the notes field.",
+    'Reply with JSON only, no markdown: {"what":"...","notes":"...","next":"..."}',
+    "what: one sentence on what the company does.",
+    "notes: one sentence on the key points in the notes.",
+    "next: one concrete suggested next step for the current stage.",
+    "Keep each field under 40 words.",
+  ].join(" ");
 
-    const text = message.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
+  const userPrompt = [
+    `Company: ${startup.name}`,
+    `Sector: ${startup.sector ?? "Unknown"}`,
+    `Stage: ${startup.stage}`,
+    `Location: ${startup.location ?? "Unknown"}`,
+    `Website: ${startup.website ?? "None"}`,
+    `One-liner: ${startup.one_liner ?? "None"}`,
+    "",
+    "Notes:",
+    noteBlock,
+  ].join("\n");
+
+  try {
+    const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: {
+            maxOutputTokens: 1000,
+            responseMimeType: "application/json",
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const detail = await response.text();
+      console.error("summarise failed", response.status, detail);
+      return NextResponse.json(
+        {
+          error:
+            "The summary service did not respond. Check GEMINI_API_KEY and GEMINI_MODEL, then try again.",
+        },
+        { status: 502 },
+      );
+    }
+
+    const data = (await response.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    const text = (data.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? "")
       .join("\n")
       .trim();
+
     const summary = parseBrief(text);
     if (!summary) {
       return NextResponse.json(
@@ -94,7 +120,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error:
-          "The summary service did not respond. Check the API key and ANTHROPIC_MODEL, then try again.",
+          "The summary service did not respond. Check GEMINI_API_KEY and GEMINI_MODEL, then try again.",
       },
       { status: 502 },
     );
