@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { summaryRequestSchema } from "@/lib/validation";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   let body: unknown;
@@ -177,7 +177,7 @@ async function generateWithFallback(
   systemPrompt: string,
   userPrompt: string,
 ): Promise<string | null> {
-  const deadline = Date.now() + 25000;
+  const deadline = Date.now() + 55000;
 
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -200,7 +200,7 @@ async function generateWithFallback(
                 responseMimeType: "application/json",
               },
             }),
-            signal: AbortSignal.timeout(8000),
+            signal: AbortSignal.timeout(25000),
           },
         );
 
